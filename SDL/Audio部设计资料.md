@@ -26,23 +26,13 @@
 以上是alsa driver提供的对外接口。
 对上的接口，alsa通过alsa-lib来提供面向应用层的接口，避免直接操作这些驱动接口
 
-## 安卓内的音频系统
 
-参考 Android_Media_Framework.md，目前在作成中。
-
-
-## SDL实现参考
-
-为什么参考SDL
-> 当前Anbox是以及SDL来实现的声音输出。这样能够看到完整的audio处理流程
-
-> SDL有广泛的应用，在声音处理的软件实现质量上肯定是过关的。
+## SDL实现调查
 
 
 ### 动态库/静态库加载
 
 主要是加载AlsaSoundLib，因为SDL是一个跨平台的库，所以库的加载都需要SDL自己来做
-本次是限定在特定平台下，目前阶段可以暂时不用关注。
 
 ### 实现接口一览表
 
@@ -62,7 +52,7 @@ ALSA_DetectDevices|启动线程来检测，使用ALSA_snd_device_name_get_hint�
 
 ---
 
-## Anbox→SDL→Alsa处理流程调查
+## App→SDL→Alsa处理流程调查
 
 
 ### SDL:AudioSink设备管理对象(核心数据结构)
@@ -91,9 +81,10 @@ SDL内部使用Device来管理AudioDevice，如果多个调用者打开同一个
 
 ```
 
-### Anbox->SDL:打开SDL_AudioSink设备
+### App->SDL:打开SDL_AudioSink设备
 
-从Anbox调用SDL接口，传递如下的默认配置参数
+以下利用项目中的App调用SDL的接口实现来说明
+从App调用SDL接口，传递如下的默认配置参数
 
 ```
   SDL_memset(&spec_, 0, sizeof(spec_));
@@ -124,7 +115,7 @@ SDL内部使用Device来管理AudioDevice，如果多个调用者打开同一个
   
 ```
 
-### Anbox->SDL:暂停SDL_AudioSink设备
+### App->SDL:暂停SDL_AudioSink设备
 
 ```
   device_id_ = SDL_OpenAudioDevice(nullptr, 0, &spec_, nullptr, 0);
@@ -750,12 +741,12 @@ The function is thread-safe when built with the proper option.
 ---
 
 
-### Android→SDL→AudioDriver之间的数据缓冲机制
+### App→SDL→AudioDriver之间的数据缓冲机制
 
 > Android应用(含AndroidAudioLib)会将数据按照不确定的频度来将raw pcm数据写入socket
 
 ↓
-> BoostAsio使用异步非阻塞的方式，响应Android侧的Socket写入，并将数据缓存到Host端的环形buffer中
+> App使用BoostAsio数据缓存到一个环形buffer中
 这个环形buffer有16个buffer元组构成，每个buffer元组长度是512个字节
 使用count来作为游标，使用pos来标记往16个buffer中哪个buffer元组写入
 
@@ -781,30 +772,6 @@ The function is thread-safe when built with the proper option.
 
 > 从上面的实现路径来看，因为采用BoostAsio的异步非阻塞特性，要求在socket读的异步回调中不能出现耗时的操作
 同时Android侧输出Audio数据是不连续的，而送入AudioDriver的数据需要是是均匀的数据段，所以这里需要有一定的缓冲
-
-
-#### 运行模型检讨
-
-> 如果不限定送入AudioDriver的数据长度，也不启动线程，即采用纯Lib库形式而不引入新的线程是不是可以呢？
-想定的实现逻辑如下所示：
-1. 响应BoostAsio的socket写入通知，触发socket的读取数据回调
-2. 在回调中沿用现有的处理逻辑，直接向数据存入环形buffer
-3. 从环形buffer中读取指定数据的长度(三种情况：1）音频刚开始播放，此时要等待足够多的数据；2）当音频播放中，仍然等待足够多的数据；3）当音频播放到末尾，应该立即返回，此时要怎么来区分呢？)
-4. 判断是否需要向AudioDriver写入数据(当前环形buffer有sample标识长度的空闲位置)
-5. Step4中如果可以写入，则将从环形buffer读的数据，送入audioDriver的环形buffer中。
-这里的问题就是如何来判断raw pcm数据已经到了末尾，直接将buffer中的数据快速送入audioDriver中呢？
-→参考中实现的逻辑是当已经读到数据，而且环形buffer中已经没有数据了，此时就直接送入audioDriver，从这个逻辑来看，好像没问题。
-这样看上去，也能实现，那么唯一的问题就是在BoostAsio中的异步回调函数中，是否支持这么多的操作处理，会否会影响音频的连续播放，问题看上去比较复杂，如果某个回调函数的执行时间比较长，则可能会引起在多个回调函数的互斥访问。
-
-> 这样从现实的角度，还是采用异步的编程模型更合理，需要新启动一个线程来完成送入数据到AudioBuffer的操作
-采用这样的编程模型，比较稳妥。不好的地方是需要加上多个同步互斥操作。比较麻烦。
-
----
-
-> 设计要点：
-ADL(Audio Driver Layer)需要提供异步编程模型，以及同步编程模型，以便后续调整，目前阶段完成了异步模型。
-
----
 
 
 
